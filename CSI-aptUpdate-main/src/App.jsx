@@ -7,12 +7,12 @@ import JsonManagerModal from './components/JsonManagerModal';
 import MatchHistoryModal from './components/MatchHistoryModal';
 import { sounds } from './utils/soundEffects';
 import confetti from 'canvas-confetti';
-import { Trophy, Zap, Play, RotateCcw, Settings, Award, History } from 'lucide-react';
+import { Trophy, Zap, Play, RotateCcw, Settings, Award, History, Timer } from 'lucide-react';
 
 export default function App() {
   // Game Configuration & Question Data State
   const [questionsData, setQuestionsData] = useState(null);
-  // 'SETUP' | 'BOARD' | 'QUESTION' | 'NO_ESCAPE_QUESTION' | 'TIE_BREAKER' | 'GAME_OVER'
+  // 'SETUP' | 'BOARD' | 'QUESTION' | 'NO_ESCAPE_QUESTION' | 'TIE_BREAKER_PREP' | 'TIE_BREAKER' | 'GAME_OVER'
   const [gameMode, setGameMode] = useState('SETUP');
 
   // Team States
@@ -34,25 +34,29 @@ export default function App() {
   const [currentTurnIndex, setCurrentTurnIndex] = useState(0); // 0 to 35 (36 total turns)
 
   // Power-up state for current turn
-  const [activePowerUp, setActivePowerUp] = useState(null); // null | 'challenge' | 'timeBomb'
+  const [activePowerUp, setActivePowerUp] = useState(null); // null | { type: 'challenge'|'timeBomb', by: 'A'|'B' }
   const [challengeQuestion, setChallengeQuestion] = useState(null); // upgraded question for challenge
 
   // No Escape state
   const [noEscapeData, setNoEscapeData] = useState(null);
-  // { question, difficulty, points, originalPoints, activatingTeam, originalActiveTeam }
 
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [isJsonModalOpen, setIsJsonModalOpen] = useState(false);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
 
-  // Full post-game / mid-game match history — one entry per question asked,
-  // across the whole game (normal turns, challenges, timebombs, no escapes,
-  // and the tie-breaker). This is the ledger organizers can pull up to
-  // resolve any participant dispute about what happened and when.
   const [matchHistory, setMatchHistory] = useState([]);
-
-  // Winner Information
   const [winnerInfo, setWinnerInfo] = useState(null);
+  const [tieBreakerPrepSeconds, setTieBreakerPrepSeconds] = useState(15);
+
+  useEffect(() => {
+    if (gameMode !== 'TIE_BREAKER_PREP') return;
+    if (tieBreakerPrepSeconds <= 0) {
+      setGameMode('TIE_BREAKER');
+      return;
+    }
+    const id = setTimeout(() => setTieBreakerPrepSeconds((s) => s - 1), 1000);
+    return () => clearTimeout(id);
+  }, [gameMode, tieBreakerPrepSeconds]);
 
   // Load questions on mount
   useEffect(() => {
@@ -87,8 +91,6 @@ export default function App() {
   };
 
   // === MATCH HISTORY LOGGING ===
-  // Every logged entry shares this shape so the MatchHistoryModal can treat
-  // normal turns, power-up turns, and tie-breaker rounds uniformly.
   const logMatchEvent = useCallback((entry) => {
     setMatchHistory((prev) => [
       ...prev,
@@ -149,9 +151,8 @@ export default function App() {
   };
 
   // === INLINE POWER-UP HANDLER ===
-  // Called before the question is revealed.
-  // initiatorTeam is 'A' or 'B'
   const handleInlinePowerUp = useCallback((type, initiatorTeam) => {
+    if (activePowerUp) return;
     if (type === 'challenge') {
       if (initiatorTeam === 'A') {
         setTeamA((prev) => ({ ...prev, powerUps: { ...prev.powerUps, challenge: false } }));
@@ -175,15 +176,21 @@ export default function App() {
 
   // === NO ESCAPE HANDLER ===
   const handleNoEscape = useCallback(() => {
-    const stageRules = getStageRules();
-    const currentQ = activePowerUp?.type === 'challenge' && challengeQuestion
-      ? challengeQuestion
-      : getCurrentQuestion();
+    // ABSOLUTE GUARD: Cannot use No Escape if a challenge is active in any way
+    if (activePowerUp?.type === 'challenge') {
+      console.warn("Blocked No Escape trigger during an active challenge.");
+      return;
+    }
 
     const isChallenged = activePowerUp?.type === 'challenge';
-    const answeringTeamKey = (isChallenged && activePowerUp?.by === 'A') ? 'B' : (isChallenged && activePowerUp?.by === 'B') ? 'A' : activeTeam;
+    const currentAnsweringTeam = isChallenged
+      ? (activePowerUp.by === 'A' ? 'B' : 'A')
+      : activeTeam;
 
-    if (answeringTeamKey === 'A') {
+    const stageRules = getStageRules();
+    const currentQ = getCurrentQuestion();
+
+    if (currentAnsweringTeam === 'A') {
       setTeamA((prev) => ({ ...prev, powerUps: { ...prev.powerUps, noEscape: false } }));
     } else {
       setTeamB((prev) => ({ ...prev, powerUps: { ...prev.powerUps, noEscape: false } }));
@@ -193,18 +200,16 @@ export default function App() {
       question: currentQ,
       difficulty: stageRules.difficulty,
       points: stageRules.points,
-      activatingTeam: answeringTeamKey
+      activatingTeam: currentAnsweringTeam
     });
 
     setGameMode('NO_ESCAPE_QUESTION');
-  }, [activeTeam, activePowerUp, challengeQuestion, currentTurnIndex, questionsData]);
+  }, [activeTeam, activePowerUp, currentTurnIndex, questionsData]);
 
   // === NO ESCAPE RESULT HANDLER ===
   const handleNoEscapeResult = (result) => {
     const { isCorrect, chosenAnswerText, correctAnswerText, questionText, timeTaken, timeLimit } = result;
     const { points, activatingTeam, difficulty } = noEscapeData;
-    // The team forced to answer (the No Escape "target") is the opposite of
-    // whoever activated the power-up.
     const answeringTeam = activatingTeam === 'A' ? 'B' : 'A';
     let posChange = 0;
     let pointsAwardedTo = null;
@@ -259,7 +264,7 @@ export default function App() {
     setNoEscapeData(null);
   };
 
-  // === SUBMIT ANSWER (Normal or Challenged) ===
+  // === SUBMIT ANSWER ===
   const handleSubmitAnswer = (result) => {
     const { isCorrect, isChallenged: wasChallenged, chosenAnswerText, correctAnswerText, questionText, timeTaken, timeLimit } = result;
     const stageRules = getStageRules();
@@ -270,7 +275,7 @@ export default function App() {
       ? (activePowerUp.by === 'A' ? 'B' : 'A')
       : activeTeam;
 
-    let pointsAwardedTo = null; // 'A' | 'B' | null
+    let pointsAwardedTo = null;
     let pointsAwarded = 0;
 
     if (answeringTeam === 'A') {
@@ -280,7 +285,6 @@ export default function App() {
         pointsAwarded = pts;
         setTeamA((prev) => ({ ...prev, score: prev.score + pts }));
       } else if (wasChallenged) {
-        // A failed the challenge issued by B, B gets 2x
         posChange = +(pts * 2);
         pointsAwardedTo = 'B';
         pointsAwarded = pts * 2;
@@ -293,7 +297,6 @@ export default function App() {
         pointsAwarded = pts;
         setTeamB((prev) => ({ ...prev, score: prev.score + pts }));
       } else if (wasChallenged) {
-        // B failed the challenge issued by A, A gets 2x
         posChange = -(pts * 2);
         pointsAwardedTo = 'A';
         pointsAwarded = pts * 2;
@@ -301,7 +304,6 @@ export default function App() {
       }
     }
 
-    // Difficulty as actually presented (a challenge upgrades it a notch)
     const loggedDifficulty = wasChallenged
       ? (stageRules.difficulty === 'easy' ? 'medium' : stageRules.difficulty === 'medium' ? 'hard' : 'very_hard')
       : stageRules.difficulty;
@@ -348,7 +350,8 @@ export default function App() {
       } else if (currentPos > 0) {
         triggerGameOver(teamB.name, 'ROPE POSITION');
       } else {
-        setGameMode('TIE_BREAKER');
+        setTieBreakerPrepSeconds(15);
+        setGameMode('TIE_BREAKER_PREP');
       }
       return;
     }
@@ -390,19 +393,19 @@ export default function App() {
     ? challengeQuestion
     : getCurrentQuestion();
   const stageRules = getStageRules();
-  const opposingTeamKey = activeTeam === 'A' ? 'B' : 'A';
   const opposingTeamObj = activeTeam === 'A' ? teamB : teamA;
   const activeTeamObj = activeTeam === 'A' ? teamA : teamB;
 
-  // Who is actually answering the question (changes when challenged)
+  // Determine which team is answering
   const isChallengedNow = activePowerUp?.type === 'challenge';
   const answeringTeamKey = isChallengedNow
     ? (activePowerUp.by === 'A' ? 'B' : 'A')
     : activeTeam;
   const answeringTeamObj = answeringTeamKey === 'A' ? teamA : teamB;
-
-
   const actualOpposingTeamObj = answeringTeamKey === 'A' ? teamB : teamA;
+
+  // STRICT RULE: If the turn is challenged, No Escape is explicitly FALSE.
+  const canUseNoEscape = !isChallengedNow && answeringTeamObj.powerUps.noEscape;
 
   let effectiveTimeLimit = stageRules.timeLimit;
   if (activePowerUp?.type === 'timeBomb') {
@@ -429,7 +432,7 @@ export default function App() {
         onResetGame={() => setGameMode('SETUP')}
       />
 
-      {/* Main Game Screen (Always visible beneath overlays) */}
+      {/* Main Game Screen */}
       {gameMode !== 'SETUP' && (
         <RopeVisualizer
           ropePosition={ropePosition}
@@ -459,7 +462,6 @@ export default function App() {
               </div>
               
               <div className="active-team-powerups">
-                {/* Challenge — active team can challenge the opponent */}
                 {activeTeamObj.powerUps.challenge ? (
                   <button 
                     className="btn-pre-powerup challenge"
@@ -473,7 +475,6 @@ export default function App() {
                   <span className="pu-used-badge">⚔️ Challenge Used</span>
                 )}
 
-                {/* TimeBomb — active team can reduce opponent's timer (medium/hard only) */}
                 {stageRules.difficulty !== 'easy' ? (
                   activeTeamObj.powerUps.timeBomb ? (
                     <button 
@@ -491,11 +492,6 @@ export default function App() {
                   <span className="level-restriction-badge">💣 TimeBomb (Med/Hard Only)</span>
                 )}
 
-                {/* No Escape — this is the ACTIVE team's own power-up: once the
-                    question is revealed, they can hand it to the opponent
-                    instead of answering it themselves. Shown here alongside
-                    Challenge/TimeBomb (instead of under "Opponent Actions",
-                    where it doesn't belong) so it's visible up front. */}
                 {activeTeamObj.powerUps.noEscape ? (
                   <span className="pu-available-badge no-escape-preview">
                     🚫 NO ESCAPE (use after reveal)
@@ -526,7 +522,6 @@ export default function App() {
             </div>
           </div>
         </div>
-
       )}
 
       {/* QUESTION MODAL */}
@@ -544,8 +539,8 @@ export default function App() {
               activeTeamName={answeringTeamObj.name}
               opposingTeamName={actualOpposingTeamObj.name}
               
-              // Answering team's power-ups
-              noEscapeAvailable={answeringTeamObj.powerUps.noEscape}
+              // Disables No Escape completely when challenged
+              noEscapeAvailable={canUseNoEscape}
               onNoEscape={handleNoEscape}
               onSubmitAnswer={handleSubmitAnswer}
             />
@@ -621,6 +616,19 @@ export default function App() {
           <button className="btn-start-game" onClick={handleStartGame}>
             <Play size={24} /> ENTER THE CLASH
           </button>
+        </div>
+      )}
+
+      {gameMode === 'TIE_BREAKER_PREP' && (
+        <div className="board-launch-overlay">
+          <div className="board-launch-card" style={{ textAlign: 'center' }}>
+            <Timer size={48} />
+            <h2>Get Ready — Tie Breaker!</h2>
+            <p>The score is tied. Sudden death starts in:</p>
+            <div className="tiebreaker-prep-countdown" style={{ fontSize: '4rem', fontWeight: 800, marginTop: '1rem' }}>
+              {tieBreakerPrepSeconds}
+            </div>
+          </div>
         </div>
       )}
 
